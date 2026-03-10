@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,6 +42,11 @@ import {
   PlusCircle,
 } from "lucide-react";
 
+const STORAGE_KEYS = {
+  transactions: "moneypilot_transactions",
+  goals: "moneypilot_goals",
+};
+
 const transactionsSeed = [
   { id: 1, date: "2026-03-01", merchant: "Mercadona", amount: -63.2, category: "Food" },
   { id: 2, date: "2026-03-02", merchant: "Renfe", amount: -24.9, category: "Transport" },
@@ -58,15 +63,6 @@ const transactionsSeed = [
   { id: 13, date: "2026-03-08", merchant: "Electricidad", amount: -71.3, category: "Bills" },
   { id: 14, date: "2026-03-09", merchant: "Freelance", amount: 340, category: "Income" },
   { id: 15, date: "2026-03-10", merchant: "Uber", amount: -17.45, category: "Transport" },
-];
-
-const monthlyTrend = [
-  { month: "Oct", income: 2400, spending: 1760 },
-  { month: "Nov", income: 2310, spending: 1820 },
-  { month: "Dec", income: 2630, spending: 2240 },
-  { month: "Jan", income: 2190, spending: 1715 },
-  { month: "Feb", income: 2325, spending: 1890 },
-  { month: "Mar", income: 2490, spending: 1315 },
 ];
 
 const budgets = {
@@ -116,7 +112,9 @@ function buildAssistantReply(question: string, context: any) {
   }
   if (q.includes("ahorro") || q.includes("save") || q.includes("goal") || q.includes("meta")) {
     const fastest = [...goals].sort((a, b) => (a.target - a.current) / a.monthlyContribution - (b.target - b.current) / b.monthlyContribution)[0];
-    return `Vas mejor encaminado en “${fastest.name}”. Manteniendo ${money(fastest.monthlyContribution)} al mes, alcanzarías la meta en aproximadamente ${Math.ceil((fastest.target - fastest.current) / fastest.monthlyContribution)} meses.`;
+    return fastest
+      ? `Vas mejor encaminado en “${fastest.name}”. Manteniendo ${money(fastest.monthlyContribution)} al mes, alcanzarías la meta en aproximadamente ${Math.ceil((fastest.target - fastest.current) / fastest.monthlyContribution)} meses.`
+      : "Todavía no has añadido metas. Crea una para que pueda orientarte mejor.";
   }
   if (q.includes("fraude") || q.includes("fraud") || q.includes("raro") || q.includes("alerta")) {
     return suspicious.length
@@ -142,12 +140,39 @@ type Goal = {
   monthlyContribution: number;
 };
 
+function getMonthlyTrendFromTransactions(transactions: Transaction[]) {
+  const grouped = new Map<string, { income: number; spending: number; month: string; sortKey: string }>();
+
+  transactions.forEach((t) => {
+    if (!t.date) return;
+    const d = new Date(`${t.date}T12:00:00`);
+    if (Number.isNaN(d.getTime())) return;
+
+    const sortKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    const month = d.toLocaleDateString("es-ES", { month: "short" });
+
+    if (!grouped.has(sortKey)) {
+      grouped.set(sortKey, { month, income: 0, spending: 0, sortKey });
+    }
+
+    const current = grouped.get(sortKey)!;
+    if (t.amount > 0) current.income += t.amount;
+    if (t.amount < 0) current.spending += Math.abs(t.amount);
+  });
+
+  return Array.from(grouped.values())
+    .sort((a, b) => a.sortKey.localeCompare(b.sortKey))
+    .slice(-6)
+    .map(({ month, income, spending }) => ({ month, income, spending }));
+}
+
 export default function AIFinanceMVP() {
-  const [transactions, setTransactions] = useState<Transaction[]>(transactionsSeed);
-  const [goals, setGoals] = useState<Goal[]>(goalsSeed);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [goals, setGoals] = useState<Goal[]>([]);
+  const [isHydrated, setIsHydrated] = useState(false);
   const [merchant, setMerchant] = useState("");
   const [amount, setAmount] = useState("");
-  const [txDate, setTxDate] = useState("2026-03-10");
+  const [txDate, setTxDate] = useState(new Date().toISOString().slice(0, 10));
   const [question, setQuestion] = useState("");
   const [editingId, setEditingId] = useState<number | null>(null);
 
@@ -163,6 +188,33 @@ export default function AIFinanceMVP() {
       content: "Hola. Soy tu coach financiero. Puedo resumir tu presupuesto, detectar suscripciones, señalar gastos anómalos y sugerir cómo llegar antes a tus metas.",
     },
   ]);
+
+  useEffect(() => {
+    try {
+      const storedTransactions = localStorage.getItem(STORAGE_KEYS.transactions);
+      const storedGoals = localStorage.getItem(STORAGE_KEYS.goals);
+
+      setTransactions(storedTransactions ? JSON.parse(storedTransactions) : transactionsSeed);
+      setGoals(storedGoals ? JSON.parse(storedGoals) : goalsSeed);
+    } catch {
+      setTransactions(transactionsSeed);
+      setGoals(goalsSeed);
+    } finally {
+      setIsHydrated(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isHydrated) return;
+    localStorage.setItem(STORAGE_KEYS.transactions, JSON.stringify(transactions));
+  }, [transactions, isHydrated]);
+
+  useEffect(() => {
+    if (!isHydrated) return;
+    localStorage.setItem(STORAGE_KEYS.goals, JSON.stringify(goals));
+  }, [goals, isHydrated]);
+
+  const monthlyTrend = useMemo(() => getMonthlyTrendFromTransactions(transactions), [transactions]);
 
   const stats = useMemo(() => {
     const totalIncome = transactions.filter((t) => t.amount > 0).reduce((a, b) => a + b.amount, 0);
@@ -198,7 +250,7 @@ export default function AIFinanceMVP() {
         name,
         limit,
         spent,
-        progress: Math.min(100, Math.round((spent / limit) * 100)),
+        progress: limit > 0 ? Math.min(100, Math.round((spent / limit) * 100)) : 0,
         over: spent > limit,
       };
     });
@@ -209,7 +261,7 @@ export default function AIFinanceMVP() {
   const resetTransactionForm = () => {
     setMerchant("");
     setAmount("");
-    setTxDate("2026-03-10");
+    setTxDate(new Date().toISOString().slice(0, 10));
     setEditingId(null);
   };
 
@@ -302,6 +354,18 @@ export default function AIFinanceMVP() {
     if (editingGoalId === id) resetGoalForm();
   };
 
+  const resetAllData = () => {
+    setTransactions([]);
+    setGoals([]);
+    localStorage.removeItem(STORAGE_KEYS.transactions);
+    localStorage.removeItem(STORAGE_KEYS.goals);
+  };
+
+  const restoreDemoData = () => {
+    setTransactions(transactionsSeed);
+    setGoals(goalsSeed);
+  };
+
   const askAssistant = () => {
     if (!question.trim()) return;
     const userMessage = { role: "user", content: question };
@@ -312,6 +376,18 @@ export default function AIFinanceMVP() {
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
     setQuestion("");
   };
+
+  if (!isHydrated) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-white via-slate-50 to-slate-100 text-slate-900 flex items-center justify-center p-6">
+        <Card className="rounded-3xl border-0 shadow-xl max-w-md w-full">
+          <CardContent className="p-6 text-center">
+            <div className="text-lg font-semibold">Cargando tus datos…</div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-white via-slate-50 to-slate-100 text-slate-900">
@@ -331,7 +407,7 @@ export default function AIFinanceMVP() {
                   </div>
                   <h1 className="text-3xl font-bold tracking-tight md:text-5xl">MoneyPilot AI</h1>
                   <p className="mt-2 max-w-2xl text-sm text-slate-600 md:text-base">
-                    Ahora puedes editar tus movimientos y metas directamente desde la app, sin tocar el código.
+                    Ahora los movimientos y metas se guardan automáticamente en tu navegador. Si borras o añades una transacción, no se pierde al recargar.
                   </p>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
@@ -377,6 +453,11 @@ export default function AIFinanceMVP() {
           </Card>
         </motion.div>
 
+        <div className="mb-6 flex flex-wrap gap-3">
+          <Button variant="outline" onClick={restoreDemoData}>Restaurar demo</Button>
+          <Button variant="outline" onClick={resetAllData}>Vaciar todos los datos</Button>
+        </div>
+
         <Tabs defaultValue="overview" className="space-y-6">
           <TabsList className="grid w-full grid-cols-4 rounded-2xl">
             <TabsTrigger value="overview">Overview</TabsTrigger>
@@ -390,30 +471,36 @@ export default function AIFinanceMVP() {
               <Card className="rounded-3xl border-0 shadow-lg">
                 <CardHeader>
                   <CardTitle>Tendencia mensual</CardTitle>
-                  <CardDescription>Ingreso vs gasto de los últimos meses.</CardDescription>
+                  <CardDescription>Se genera automáticamente a partir de tus transacciones.</CardDescription>
                 </CardHeader>
                 <CardContent className="h-[340px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={monthlyTrend}>
-                      <defs>
-                        <linearGradient id="incomeFill" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="currentColor" stopOpacity={0.25} />
-                          <stop offset="95%" stopColor="currentColor" stopOpacity={0.02} />
-                        </linearGradient>
-                        <linearGradient id="spendFill" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="currentColor" stopOpacity={0.18} />
-                          <stop offset="95%" stopColor="currentColor" stopOpacity={0.02} />
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="month" />
-                      <YAxis />
-                      <Tooltip formatter={(value) => money(Number(value))} />
-                      <Legend />
-                      <Area type="monotone" dataKey="income" name="Ingresos" fill="url(#incomeFill)" stroke="currentColor" />
-                      <Area type="monotone" dataKey="spending" name="Gastos" fill="url(#spendFill)" stroke="currentColor" />
-                    </AreaChart>
-                  </ResponsiveContainer>
+                  {monthlyTrend.length > 0 ? (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={monthlyTrend}>
+                        <defs>
+                          <linearGradient id="incomeFill" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="currentColor" stopOpacity={0.25} />
+                            <stop offset="95%" stopColor="currentColor" stopOpacity={0.02} />
+                          </linearGradient>
+                          <linearGradient id="spendFill" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="currentColor" stopOpacity={0.18} />
+                            <stop offset="95%" stopColor="currentColor" stopOpacity={0.02} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="month" />
+                        <YAxis />
+                        <Tooltip formatter={(value) => money(Number(value))} />
+                        <Legend />
+                        <Area type="monotone" dataKey="income" name="Ingresos" fill="url(#incomeFill)" stroke="currentColor" />
+                        <Area type="monotone" dataKey="spending" name="Gastos" fill="url(#spendFill)" stroke="currentColor" />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="h-full rounded-2xl border border-dashed bg-slate-50 p-6 flex items-center justify-center text-sm text-slate-500 text-center">
+                      No hay datos suficientes para dibujar la tendencia mensual. Añade transacciones con fecha y el gráfico aparecerá automáticamente.
+                    </div>
+                  )}
                 </CardContent>
               </Card>
 
@@ -423,17 +510,23 @@ export default function AIFinanceMVP() {
                   <CardDescription>Categorización automática de movimientos.</CardDescription>
                 </CardHeader>
                 <CardContent className="h-[340px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie data={stats.byCategory} dataKey="value" nameKey="name" outerRadius={110} innerRadius={60}>
-                        {stats.byCategory.map((entry, index) => (
-                          <Cell key={entry.name} fill={piePalette[index % piePalette.length]} />
-                        ))}
-                      </Pie>
-                      <Tooltip formatter={(value) => money(Number(value))} />
-                      <Legend />
-                    </PieChart>
-                  </ResponsiveContainer>
+                  {stats.byCategory.length > 0 ? (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie data={stats.byCategory} dataKey="value" nameKey="name" outerRadius={110} innerRadius={60}>
+                          {stats.byCategory.map((entry, index) => (
+                            <Cell key={entry.name} fill={piePalette[index % piePalette.length]} />
+                          ))}
+                        </Pie>
+                        <Tooltip formatter={(value) => money(Number(value))} />
+                        <Legend />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="h-full rounded-2xl border border-dashed bg-slate-50 p-6 flex items-center justify-center text-sm text-slate-500 text-center">
+                      Todavía no hay gastos categorizados para mostrar.
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             </div>
@@ -538,6 +631,11 @@ export default function AIFinanceMVP() {
                         </div>
                       </motion.div>
                     ))}
+                    {!transactions.length && (
+                      <div className="rounded-2xl border border-dashed bg-white p-5 text-sm text-slate-500">
+                        No hay transacciones todavía.
+                      </div>
+                    )}
                   </div>
                 </CardContent>
               </Card>
@@ -582,7 +680,7 @@ export default function AIFinanceMVP() {
                 </CardHeader>
                 <CardContent className="space-y-4">
                   {goals.map((goal) => {
-                    const pct = Math.round((goal.current / goal.target) * 100);
+                    const pct = goal.target > 0 ? Math.round((goal.current / goal.target) * 100) : 0;
                     const monthsLeft = Math.max(0, Math.ceil((goal.target - goal.current) / goal.monthlyContribution));
                     return (
                       <div key={goal.id} className="rounded-2xl border bg-white p-5">
@@ -672,9 +770,9 @@ export default function AIFinanceMVP() {
 
         <Separator className="my-8" />
         <div className="grid gap-4 md:grid-cols-3">
-          <FooterCard title="Editable desde la UI" text="Ya no necesitas tocar arrays en el código para cambiar movimientos o metas." />
-          <FooterCard title="Siguiente mejora" text="El siguiente paso ideal es guardar cambios en localStorage o base de datos." />
-          <FooterCard title="Preparada para crecer" text="La estructura ya está lista para conectar backend y persistencia." />
+          <FooterCard title="Guardado automático" text="Las transacciones y metas se conservan en tu navegador con localStorage." />
+          <FooterCard title="Gráfico limpio" text="La tendencia mensual solo aparece cuando existen datos reales suficientes." />
+          <FooterCard title="Preparada para crecer" text="La siguiente mejora natural sería pasar de localStorage a base de datos." />
         </div>
       </div>
     </div>
